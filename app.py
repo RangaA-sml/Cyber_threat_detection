@@ -20,7 +20,7 @@ model = joblib.load("models/final_xgboost_model.pkl")
 imputer = joblib.load("models/xgb_imputer.pkl")
 features = joblib.load("models/xgb_features.pkl")
 
-st.success("✅ XGBoost model loaded successfully!")
+st.success("✅ Detection model is ready!")
 
 # Test the model with sample network traffic
 st.subheader("🧪 Try the Detection System")
