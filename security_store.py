@@ -4,7 +4,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from contextlib import contextmanager
 import json
-import hashlib
 from pathlib import Path
 import sqlite3
 import uuid
@@ -113,33 +112,12 @@ def _severity_for(confidence: float | None) -> str:
     return "Low"
 
 
-
-def get_severity_score(severity: str, incident_id: str) -> int:
-    """Return a stable demo triage score for the SOC severity label.
-
-    This is a presentation/priority score, not the model's attack probability.
-    """
-    ranges = {
-        "Low": (10, 20),
-        "Medium": (40, 60),
-        "High": (70, 85),
-        "Critical": (90, 100),
-    }
-    severity = str(severity).strip().title()
-    if severity not in ranges:
-        return 0
-
-    low, high = ranges[severity]
-    digest = hashlib.sha256(str(incident_id).encode("utf-8")).hexdigest()
-    stable_number = int(digest[:8], 16)
-    return low + (stable_number % (high - low + 1))
-
-
 def store_attack_predictions(data: pd.DataFrame, results: pd.DataFrame, source_file: str) -> list[str]:
     """Create one incident for each row predicted as class 1 (Attack).
 
-    A new batch identifier groups detections produced by one model run. Re-running
-    the same file deliberately produces a new batch so analysts can compare scans.
+    Each model run replaces the previous incident queue so the SOC dashboard
+    shows only alerts from the latest uploaded dataset. Existing incident records
+    and their activity history are deleted when a new scan is submitted.
     """
     init_database()
     if "Prediction code" not in results.columns:
@@ -150,6 +128,10 @@ def store_attack_predictions(data: pd.DataFrame, results: pd.DataFrame, source_f
     created_ids: list[str] = []
 
     with _database_connection() as connection:
+        # Start a clean incident queue for the latest dataset/model run.
+        # ON DELETE CASCADE also removes the previous incidents' audit events.
+        connection.execute("DELETE FROM incidents")
+
         for result_index, result in results.iterrows():
             try:
                 is_attack = int(result["Prediction code"]) == 1
@@ -174,15 +156,7 @@ def store_attack_predictions(data: pd.DataFrame, results: pd.DataFrame, source_f
                 f"SOC-{datetime.now(timezone.utc).strftime('%y%m%d')}-"
                 f"{uuid.uuid4().hex[:6].upper()}"
             )
-            # Prefer an explicit SOC demo severity supplied by the mixed dataset.
-            # The XGBoost model remains binary (Benign/Attack); this field is
-            # demonstration triage metadata, not a model-predicted class.
-            supplied_severity = str(raw_record.get("Demo Severity", "")).strip().title()
-            severity = (
-                supplied_severity
-                if supplied_severity in SEVERITIES
-                else _severity_for(confidence)
-            )
+            severity = _severity_for(confidence)
             prediction_code = str(result["Prediction code"])
             connection.execute(
                 """INSERT INTO incidents
@@ -206,6 +180,22 @@ def store_attack_predictions(data: pd.DataFrame, results: pd.DataFrame, source_f
     return created_ids
 
 
+
+def clear_all_incidents() -> int:
+    """Delete every incident and its audit events; keep the database and tables."""
+    init_database()
+    with _database_connection() as connection:
+        count = connection.execute("SELECT COUNT(*) FROM incidents").fetchone()[0]
+        # The foreign key is configured with ON DELETE CASCADE, so deleting
+        # incidents also removes their related incident_events rows.
+        connection.execute("DELETE FROM incidents")
+        # Reset the event counter for a clean, empty audit table.
+        connection.execute(
+            "DELETE FROM sqlite_sequence WHERE name = 'incident_events'"
+        )
+    return int(count)
+
+
 def get_incidents() -> pd.DataFrame:
     init_database()
     with _database_connection() as connection:
@@ -218,13 +208,7 @@ def get_incidents() -> pd.DataFrame:
                last_note AS 'Latest Analyst Note'
                FROM incidents ORDER BY created_at DESC"""
         ).fetchall()
-    incidents = pd.DataFrame([dict(row) for row in rows])
-    if not incidents.empty:
-        incidents["Threat Severity Score (%)"] = incidents.apply(
-            lambda row: get_severity_score(row["Severity"], row["Incident ID"]),
-            axis=1,
-        )
-    return incidents
+    return pd.DataFrame([dict(row) for row in rows])
 
 
 def get_incident(incident_id: str) -> dict[str, Any] | None:
@@ -238,10 +222,6 @@ def get_incident(incident_id: str) -> dict[str, Any] | None:
         incident["details"] = json.loads(incident.pop("details_json"))
     except (TypeError, json.JSONDecodeError):
         incident["details"] = {}
-    incident["threat_severity_score"] = get_severity_score(
-        incident.get("severity", ""),
-        incident.get("incident_id", ""),
-    )
     return incident
 
 
