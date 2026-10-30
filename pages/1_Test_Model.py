@@ -1,106 +1,107 @@
-import os
-import joblib
+from __future__ import annotations
+
+import hashlib
+from io import BytesIO
+from pathlib import Path
+
 import pandas as pd
 import streamlit as st
 
+from sentinel_utils import (
+    load_artifacts,
+    label_for,
+    prepare_features,
+    render_footer,
+    render_navigation,
+)
+from security_store import store_attack_predictions
 
-def render_navigation(current_page):
-    st.markdown("""<style>
-    [data-testid="stSidebar"] {display:none;}
-    .block-container {max-width:1240px;padding-top:1rem;padding-bottom:3rem;}
-    div[data-testid="stPageLink"] a {
-        min-height: 3.25rem; display:flex; align-items:center; justify-content:center;
-        border:2px solid #2563eb !important; border-radius:13px; padding:.9rem 1rem;
-        text-decoration:none !important; font-weight:850 !important; color:#ffffff !important;
-        background:linear-gradient(135deg,#3478f6,#1d4ed8) !important;
-        box-shadow:0 7px 18px rgba(37,99,235,.28); transition:all .18s ease;
-    }
-    div[data-testid="stPageLink"] a:hover {
-        border-color:#1e40af !important; background:linear-gradient(135deg,#2563eb,#1e40af) !important;
-        color:#ffffff !important; box-shadow:0 10px 24px rgba(37,99,235,.38); transform:translateY(-2px);
-    }
-    div[data-testid="stPageLink"] a:focus-visible {outline:3px solid #f59e0b !important;outline-offset:3px;}
-    </style>""", unsafe_allow_html=True)
-    n1, n2, n3 = st.columns([1, 1.25, 1.1])
-    with n1:
-        st.page_link("app.py", label="⌂  Overview", use_container_width=True)
-    with n2:
-        st.page_link("pages/1_Test_Model.py", label="🧪  Test the Model", use_container_width=True)
-    with n3:
-        st.page_link("pages/2_About_Model.py", label="ⓘ  About the Model", use_container_width=True)
-    st.divider()
 
-st.set_page_config(page_title="Test the Model", page_icon="🛡️", layout="wide")
+st.set_page_config(
+    page_title="Test the Model | SentinelAI",
+    page_icon="🛡️",
+    layout="wide",
+)
 
 render_navigation("testing")
-st.markdown("""
-<style>
-.block-container {max-width:1240px;padding-top:1.5rem;padding-bottom:3rem;}
-.page-hero {padding:2rem 2.2rem;border-radius:18px;background:linear-gradient(120deg,light-dark(#f6f9ff,#0c1427),light-dark(#eaf1ff,#142344));border:1px solid light-dark(#e2e9f5,#293650);margin-bottom:1.5rem;}
-.page-hero h1 {margin:.6rem 0;font-size:clamp(2rem,4vw,3rem);letter-spacing:-.04em;}
-.page-hero p {color:light-dark(#65718a,#aab7ce);line-height:1.7;margin-bottom:0;max-width:800px;}
-.section-label {font-size:.72rem;letter-spacing:.15em;text-transform:uppercase;font-weight:800;color:#3974e8;}
-div[data-testid="stMetric"] {padding:1rem;border:1px solid rgba(128,145,170,.24);border-radius:14px;background:light-dark(#fff,#111a2d);}
-.panel {padding:1.2rem;border:1px solid light-dark(#e3e9f3,#293650);border-radius:16px;background:light-dark(#fff,#111a2d);}
-</style>
-""", unsafe_allow_html=True)
 
-st.markdown("""
-<div class="page-hero">
- <div class="section-label">MODEL WORKSPACE</div>
- <h1>Test your network traffic</h1>
- <p>Upload a CSV dataset, validate its features, and review predictions from your saved XGBoost model.</p>
-</div>
-""", unsafe_allow_html=True)
+st.markdown(
+    """
+    <div class="page-hero">
+      <div class="section-label">MODEL WORKSPACE</div>
+      <h1>Test your network traffic</h1>
+      <p>Upload a network traffic CSV and run the saved XGBoost model.
+      Malicious predictions are automatically forwarded to the Security
+      Operations Center for analyst review.</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
-MODEL_PATH = "models/final_xgboost_model.pkl"
-IMPUTER_PATH = "models/xgb_imputer.pkl"
-FEATURES_PATH = "models/xgb_features.pkl"
+# Load the existing trained model and preprocessing artifacts.
+model, imputer, features, missing_paths, load_error = load_artifacts()
 
-@st.cache_resource
-def load_artifacts():
-    return joblib.load(MODEL_PATH), joblib.load(IMPUTER_PATH), list(joblib.load(FEATURES_PATH))
-
-missing_paths = [p for p in (MODEL_PATH, IMPUTER_PATH, FEATURES_PATH) if not os.path.exists(p)]
 if missing_paths:
-    st.error("Model files not found. Run Streamlit from your project root and confirm these paths:")
-    for p in missing_paths:
-        st.code(p)
+    st.error("Model files were not found. Confirm that these files exist inside the models/ folder:")
+    for path in missing_paths:
+        try:
+            st.code(str(path.relative_to(Path(__file__).resolve().parents[1])))
+        except ValueError:
+            st.code(str(path))
     st.stop()
 
-try:
-    model, imputer, features = load_artifacts()
-except Exception as exc:
-    st.error(f"Unable to load model artifacts: {exc}")
+if load_error:
+    st.error(f"Unable to load model artifacts: {load_error}")
     st.stop()
 
-st.success("Model loaded successfully.")
+st.success(f"Model loaded successfully · {len(features)} expected input features")
+
 with st.expander("View model input requirements"):
     st.write(f"Expected feature count: **{len(features)}**")
-    st.write("The CSV must contain every required feature. Extra columns are ignored for prediction.")
+    st.write("The CSV must contain every required model feature. Extra columns, including Demo Severity metadata, are ignored by model inference.")
     st.code(", ".join(features))
 
-a, b = st.columns(2)
-for col, label, path, filename in [
-    (a, "🟢 Download Benign Sample", "benign_sample.csv", "benign_sample.csv"),
-    (b, "🔴 Download Attack Sample", "attack_sample.csv", "attack_sample.csv"),
-]:
-    with col:
-        if os.path.exists(path):
-            with open(path, "rb") as f:
-                payload = f.read()
-            st.download_button(label, payload, filename, "text/csv", use_container_width=True)
-        else:
-            st.warning(f"Sample file not found: `{path}`. Add your real sample file to enable this download.")
+# One combined demonstration dataset download.
+root = Path(__file__).resolve().parents[1]
+dataset_filename = "network_traffic_mixed_demo.csv"
+dataset_path = root / dataset_filename
+
+if dataset_path.is_file():
+    st.download_button(
+        label="📥 Download Mixed Network Traffic Dataset",
+        data=dataset_path.read_bytes(),
+        file_name=dataset_filename,
+        mime="text/csv",
+        use_container_width=True,
+        type="primary",
+    )
+else:
+    st.warning(f"Combined demonstration dataset not found: {dataset_filename}")
 
 st.divider()
 st.markdown('<div class="section-label">INPUT DATA</div>', unsafe_allow_html=True)
 st.header("Upload network traffic CSV")
-uploaded_file = st.file_uploader("Choose a CSV file", type=["csv"], help="Use the feature definitions and preprocessing expected by your trained model.")
+
+uploaded_file = st.file_uploader(
+    "Choose a CSV file",
+    type=["csv"],
+    help="Upload a CSV containing all required features expected by the trained model.",
+)
 
 if uploaded_file is not None:
+    content = uploaded_file.getvalue()
+    signature = hashlib.sha256(
+        uploaded_file.name.encode("utf-8") + content
+    ).hexdigest()
+
+    # Clear the previous on-screen run result when a different file is selected.
+    if st.session_state.get("_sentinel_upload_signature") != signature:
+        st.session_state.pop("sentinel_run_message", None)
+        st.session_state.pop("sentinel_run_counts", None)
+        st.session_state["_sentinel_upload_signature"] = signature
+
     try:
-        data = pd.read_csv(uploaded_file)
+        data = pd.read_csv(BytesIO(content))
     except Exception as exc:
         st.error(f"Could not read the CSV: {exc}")
         st.stop()
@@ -109,88 +110,129 @@ if uploaded_file is not None:
         st.warning("The CSV contains no data rows.")
         st.stop()
 
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Records", f"{len(data):,}")
-    m2.metric("CSV columns", f"{len(data.columns):,}")
-    m3.metric("Required features", f"{len(features):,}")
-
-    with st.expander("Preview uploaded data", expanded=True):
-        st.dataframe(data.head(10), use_container_width=True)
-
-    missing_features = [col for col in features if col not in data.columns]
+    missing_features = [column for column in features if column not in data.columns]
     if missing_features:
         st.error(f"{len(missing_features)} required feature(s) are missing.")
-        st.dataframe(pd.DataFrame({"Missing feature": missing_features}), use_container_width=True)
+        st.write(", ".join(missing_features))
         st.stop()
 
-    st.info("All required feature columns are present. Confirm that feature types and encodings match training before running predictions.")
-    if st.button("🚀 Run threat detection", type="primary", use_container_width=True):
+    st.info(
+        f"CSV loaded: **{len(data):,} records** · "
+        f"All {len(features)} required model features are present."
+    )
+
+    if st.button(
+        "🚀 Run threat detection",
+        type="primary",
+        use_container_width=True,
+    ):
         try:
-            X = data.loc[:, features].copy()
-            for i, col in enumerate(features):
-                X[col] = pd.to_numeric(X[col], errors="coerce")
-                X[col] = X[col].fillna(imputer.statistics_[i])
+            X = prepare_features(data, features, imputer)
+            predictions = model.predict(X.to_numpy())
 
-            X_processed = X.to_numpy()
-            predictions = model.predict(X_processed)
-            results = pd.DataFrame({"Prediction code": predictions})
+            results = pd.DataFrame(
+                {
+                    "Record #": range(1, len(predictions) + 1),
+                    "Prediction code": predictions,
+                    "Prediction": [label_for(value) for value in predictions],
+                }
+            )
 
-            label_map = {0: "Benign", 1: "Attack"}
-            results["Prediction"] = pd.Series(predictions).map(label_map).fillna(pd.Series(predictions).astype(str))
-
+            # Keep model confidence available to the incident backend.
             if hasattr(model, "predict_proba"):
-                probabilities = model.predict_proba(X_processed)
+                probabilities = model.predict_proba(X.to_numpy())
                 classes = list(getattr(model, "classes_", []))
-                for class_code, probs in zip(classes, probabilities.T):
-                    label = label_map.get(class_code, f"Class {class_code}")
-                    results[f"{label} Probability (%)"] = (probs * 100).round(2)
+
+                for class_index, class_code in enumerate(classes):
+                    class_label = label_for(class_code)
+                    results[f"{class_label} Probability (%)"] = (
+                        probabilities[:, class_index] * 100
+                    ).round(2)
+
+                if classes:
+                    class_to_column = {
+                        str(code): index for index, code in enumerate(classes)
+                    }
+                    confidence_values = []
+                    for row_index, predicted in enumerate(predictions):
+                        class_index = class_to_column.get(str(predicted))
+                        confidence_values.append(
+                            round(
+                                float(probabilities[row_index, class_index] * 100),
+                                2,
+                            )
+                            if class_index is not None
+                            else None
+                        )
+                    results["Prediction Confidence (%)"] = confidence_values
 
             total = len(predictions)
-            benign = int((predictions == 0).sum())
-            attacks = int((predictions == 1).sum())
+            benign = sum(label_for(value) == "Benign" for value in predictions)
+            attacks = sum(label_for(value) == "Attack" for value in predictions)
             other = total - benign - attacks
-            st.session_state["sentinel_results"] = results
-            st.session_state["sentinel_summary"] = (total, benign, attacks, other)
+
+            # Create/replace the SOC incident queue using the existing backend.
+            incident_ids = store_attack_predictions(
+                data,
+                results,
+                uploaded_file.name,
+            )
+
+            st.session_state["sentinel_run_counts"] = {
+                "total": total,
+                "benign": benign,
+                "attacks": attacks,
+                "other": other,
+                "alerts": len(incident_ids),
+            }
+            st.session_state["sentinel_run_message"] = (
+                f"Analysis completed for {total:,} records."
+            )
+
         except Exception as exc:
-            st.error(f"Prediction failed. Check input types and training-time preprocessing. Details: {exc}")
+            st.error(
+                "Prediction failed. Check input types and training-time "
+                f"preprocessing. Details: {exc}"
+            )
 
-if "sentinel_results" in st.session_state:
-    results = st.session_state["sentinel_results"]
-    total, benign, attacks, other = st.session_state["sentinel_summary"]
+# Compact completion message only: no CSV preview, metric cards,
+# detection-summary dashboard, or detailed prediction table.
+if "sentinel_run_counts" in st.session_state:
+    counts = st.session_state["sentinel_run_counts"]
+
     st.divider()
-    st.markdown('<div class="section-label">DETECTION OUTPUT</div>', unsafe_allow_html=True)
-    st.header("Detection summary")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total records", f"{total:,}")
-    c2.metric("Benign", f"{benign:,}")
-    c3.metric("Potential attacks", f"{attacks:,}")
-    c4.metric("Attack percentage", f"{(attacks / total * 100) if total else 0:.2f}%")
+    st.markdown('<div class="section-label">ANALYSIS STATUS</div>', unsafe_allow_html=True)
+    st.success(st.session_state.get("sentinel_run_message", "Analysis completed."))
 
-    if attacks:
-        st.error(f"Potential attack predictions found in {attacks:,} record(s). Review the results carefully.")
+    if counts["attacks"] > 0:
+        st.warning(
+            f"{counts['attacks']:,} records were classified as potential attacks. "
+            f"{counts['alerts']:,} incident(s) were forwarded to the Security Operations Center."
+        )
     else:
-        st.success("No records were classified as Attack by this model.")
-    if other:
-        st.warning(f"{other:,} records have class labels other than 0 or 1. Check your label mapping.")
+        st.success("No records were classified as attacks. No SOC incidents were generated.")
 
-    st.subheader("Detailed prediction results")
-    st.dataframe(results, use_container_width=True)
-    st.download_button(
-        "⬇️ Download prediction results",
-        results.to_csv(index=False).encode("utf-8"),
-        "cyber_threat_predictions.csv",
-        "text/csv",
-        type="primary",
+    if counts["other"] > 0:
+        st.warning(
+            f"{counts['other']:,} records have class labels other than Benign or Attack. "
+            "Verify the model's class-label mapping."
+        )
+
+    st.page_link(
+        "pages/3_Security_Team.py",
+        label="🛡️ Open Security Operations Center",
+        use_container_width=True,
     )
 
 st.markdown("---")
-st.markdown('<div class="section-label">CONTINUE EXPLORING</div>', unsafe_allow_html=True)
-st.subheader("Continue to another section")
-bottom1, bottom2, bottom3 = st.columns(3)
-with bottom1:
-    st.page_link("app.py", label="⌂  Overview  →", use_container_width=True)
-with bottom2:
-    st.page_link("pages/1_Test_Model.py", label="🧪  Test the Model", use_container_width=True)
-with bottom3:
-    st.page_link("pages/2_About_Model.py", label="ⓘ  About the Model  →", use_container_width=True)
-st.caption("Predictions are model outputs, not a guarantee that traffic is safe or malicious. Validate results using your security workflow.")
+st.markdown('<div class="section-label">NEXT STEP</div>', unsafe_allow_html=True)
+st.write(
+    "Security analysts can review generated incidents, assign ownership, "
+    "record investigation notes and track incident resolution in the SOC."
+)
+st.page_link(
+    "pages/3_Security_Team.py",
+    label="Open Security Operations Center →",
+    use_container_width=True,
+)
+render_footer()
